@@ -15,7 +15,9 @@
 - ✅ **S5. Pipe (сессия)** — `internal/pipe/pipe.go`: дуплекс на горутинах (единый flusher, read-ahead reorder, EOF, enc), реализует `transport.Session`. Тюнинг-константы здесь. Двусторонний loopback (300k/180k, enc) через Яндекс PASS.
 - ✅ **S6. webdav.Transport.Accept** — поллинг `tunnel/`, srv-hb, per-session staleness (по hb), отдача Pipe-сессий, уборка dir при Close. REST-аплоад s2c при OAuthToken. ⚠️ PROPFIND **depth=2 Яндекс отдаёт 403** → откат на depth=1 + GET init на кандидата.
 - ✅ **S7. End-to-end интеграция** — Go-сервер (`wtserver`) ↔ `webdav-tunnel -mode client` (стенд-ин WireTurn) через живой Яндекс: linked 7s, curl #1→egress, curl #2→ifconfig.me, сервер логирует оба `connect`. Wire-совместимость с WireTurn доказана.
-- 🔄 **S8. Полировка** — README для server-go, финальный build/vet, чистка временных, (опц.) адаптивный poll.
+- ✅ **S8. Полировка** — README обновлён (статус MVP1 рабочий), `go build/vet/test ./...` зелёные (live-тесты скипаются без кредов), временные почищены.
+
+**Автономный порт MVP1 (WebDAV) завершён.** Go-сервер `wtserver` функционально полон и wire-совместим с WireTurn (проверено end-to-end). Дальше — только этапы с твоим участием (ниже).
 
 ## Требуют участия пользователя
 
@@ -37,3 +39,4 @@
 - S5 — Pipe Go (горутины/каналы). Двусторонний loopback 300k/180k enc через Яндекс PASS.
 - S6 — webdav.Transport.Accept (поллинг/сессии). Открыл: Яндекс запрещает PROPFIND depth=2 (403) → depth=1 + GET init.
 - S7 — E2E: Go-сервер wtserver ↔ Go-клиент через Яндекс. curl сквозь SOCKS5 дошёл (egress 91.197.0.63 + ifconfig.me). Wire-совместимо с WireTurn.
+- S8 — README/полировка. build/vet/test зелёные. Автономный порт MVP1 завершён.

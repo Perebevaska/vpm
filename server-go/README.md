@@ -40,10 +40,18 @@ internal/supervisor       сборка транспорт×handler по типу
 ```
 
 ## Статус
-- ✅ Каркас компилируется (`go build ./...`), egress (direct/SOCKS5) и yamux-passthrough реализованы.
-- ⬜ `webdav.Transport.Accept` — портировать логику из `server/wt/{webdav,pipe,crypto,rest_upload}.py`
-  (+ оптимизации: PROPFIND depth=2, startup-cleanup только своих stale, адаптивный poll).
-- ⬜ `olcrtc.Transport` + `VLESSBridge` — MVP2 (pion/webrtc, сигналинг, видео-кодирование).
+- ✅ **MVP1 (webdav) рабочий end-to-end.** crypto, WebDAV-клиент, REST-аплоадер, Pipe,
+  `webdav.Transport`, egress (direct/SOCKS5), yamux-passthrough. Проверено:
+  `wtserver` ↔ `webdav-tunnel -mode client` (стенд-ин WireTurn) через живой Яндекс,
+  curl сквозь SOCKS5 доходит до цели. Wire-совместимо с WireTurn.
+- ⬜ `olcrtc.Transport` + `VLESSBridge` — MVP2 (pion/webrtc, сигналинг, видео-кодирование). Заглушка.
+
+Прогресс и журнал — в [PLAN.md](PLAN.md). Дизайн-решения (с учётом замера #8) — [DESIGN.md](DESIGN.md).
+
+### Заметки реализации
+- Яндекс отдаёт **403 на PROPFIND Depth:2** → discovery = depth=1 + GET `init` на кандидата.
+- Тюнинг-дефолты (замер #8): chunk 256KB, read-ahead 16, put-workers 16, poll 50–300ms.
+- Тесты live скипаются без кредов; запуск: `set -a && . /path/.env && set +a && go test ./...`.
 
 ## Запуск
 ```sh
