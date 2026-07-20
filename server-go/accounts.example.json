@@ -1,0 +1,23 @@
+{
+  "egress": {
+    "proxy": "socks5://192.168.1.1:10800"
+  },
+  "accounts": [
+    {
+      "id": "user1",
+      "transport": "webdav",
+      "enc": true,
+      "webdav_url": "https://webdav.yandex.ru",
+      "login": "PLACEHOLDER_LOGIN",
+      "app_password": "PLACEHOLDER_APP_PASSWORD",
+      "oauth_token": "PLACEHOLDER_OAUTH_TOKEN"
+    },
+    {
+      "id": "user2-mvp2",
+      "transport": "olcrtc",
+      "enc": true,
+      "olcrtc_url": "olcrtc://wbstream@room123",
+      "chain_addr": "server1.internal:443"
+    }
+  ]
+}
