@@ -13,9 +13,9 @@
 - ✅ **S3. WebDAV-клиент** — `internal/dav/client.go`: PUT/GET/DELETE/MKCOL/PROPFIND/OPTIONS, basic-auth, browser-UA, no-cache, 429/423. Live round-trip на Яндексе PASS.
 - ✅ **S4. REST-аплоадер** — `internal/dav/restup.go`: Yandex REST upload (href+PUT), интерфейс `Uploader`. REST-put → WebDAV-get PASS.
 - ✅ **S5. Pipe (сессия)** — `internal/pipe/pipe.go`: дуплекс на горутинах (единый flusher, read-ahead reorder, EOF, enc), реализует `transport.Session`. Тюнинг-константы здесь. Двусторонний loopback (300k/180k, enc) через Яндекс PASS.
-- 🔄 **S6. webdav.Transport.Accept** — поллинг `tunnel/` (PROPFIND depth=2 → sid+init за 1 запрос), srv-hb, self-only stale-cleanup, отдача Pipe-сессий. REST-аплоад s2c по умолчанию при OAuthToken.
-- ⬜ **S7. End-to-end интеграция** — Go-сервер ↔ `webdav-tunnel -mode client` (стенд-ин WireTurn) через живой Яндекс, curl сквозь SOCKS5 → проверка egress. Wire-совместимость.
-- ⬜ **S8. Полировка** — bounded http.Client per-account, адаптивный poll-заглушка, README, финальный build/vet, чистка.
+- ✅ **S6. webdav.Transport.Accept** — поллинг `tunnel/`, srv-hb, per-session staleness (по hb), отдача Pipe-сессий, уборка dir при Close. REST-аплоад s2c при OAuthToken. ⚠️ PROPFIND **depth=2 Яндекс отдаёт 403** → откат на depth=1 + GET init на кандидата.
+- ✅ **S7. End-to-end интеграция** — Go-сервер (`wtserver`) ↔ `webdav-tunnel -mode client` (стенд-ин WireTurn) через живой Яндекс: linked 7s, curl #1→egress, curl #2→ifconfig.me, сервер логирует оба `connect`. Wire-совместимость с WireTurn доказана.
+- 🔄 **S8. Полировка** — README для server-go, финальный build/vet, чистка временных, (опц.) адаптивный poll.
 
 ## Требуют участия пользователя
 
@@ -35,3 +35,5 @@
 - S3 — WebDAV-клиент Go. Live round-trip (ping/mkcol/put/get/404/propfind/delete) PASS.
 - S4 — REST-аплоадер Go. REST-put → WebDAV-get PASS (write-путь wire-совместим).
 - S5 — Pipe Go (горутины/каналы). Двусторонний loopback 300k/180k enc через Яндекс PASS.
+- S6 — webdav.Transport.Accept (поллинг/сессии). Открыл: Яндекс запрещает PROPFIND depth=2 (403) → depth=1 + GET init.
+- S7 — E2E: Go-сервер wtserver ↔ Go-клиент через Яндекс. curl сквозь SOCKS5 дошёл (egress 91.197.0.63 + ifconfig.me). Wire-совместимо с WireTurn.

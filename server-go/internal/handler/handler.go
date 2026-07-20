@@ -64,6 +64,7 @@ func (h YamuxPassthrough) serveStream(ctx context.Context, sid string, stream ne
 	if err != nil {
 		return
 	}
+	log.Printf("[%s] connect %s:%d", sid, host, port)
 	up, err := h.Dialer.Dial(ctx, host, port)
 	if err != nil {
 		log.Printf("[%s] dial %s:%d: %v", sid, host, port, err)
