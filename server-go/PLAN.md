@@ -10,8 +10,8 @@
 - ✅ **S0.1 DESIGN с учётом замера #8** — striping отклонён, REST-дефолт, тюнинг-дефолты. (`f941939`)
 - ✅ **S1. PLAN.md** — этот файл. (`b3b92d2`)
 - ✅ **S2. crypto** — `internal/crypto`: derive_key + AES-256-GCM (nonce‖ct‖tag). `go test` зелёный; кросс-язык Python↔Go проверен в обе стороны (интероп доказан).
-- 🔄 **S3. WebDAV-клиент** — `internal/dav`: PUT/GET/DELETE/MKCOL/PROPFIND/OPTIONS, basic-auth, browser-UA, no-cache, 429/423-обработка. Тест: live round-trip на Яндексе (scratch-папка).
-- ⬜ **S4. REST-аплоадер** — `internal/dav`: Yandex REST upload (href+PUT). Тест: REST-put → WebDAV-get.
+- ✅ **S3. WebDAV-клиент** — `internal/dav/client.go`: PUT/GET/DELETE/MKCOL/PROPFIND/OPTIONS, basic-auth, browser-UA, no-cache, 429/423. Live round-trip на Яндексе PASS.
+- 🔄 **S4. REST-аплоадер** — `internal/dav`: Yandex REST upload (href+PUT). Тест: REST-put → WebDAV-get.
 - ⬜ **S5. Pipe (сессия)** — `internal/pipe`: дуплекс поверх чанков (coalesce-запись, read-ahead чтение, порядок, EOF, enc), реализует `transport.Session` (io.ReadWriteCloser + ID). Тюнинг из DESIGN. Тест: двусторонний loopback через Яндекс.
 - ⬜ **S6. webdav.Transport.Accept** — поллинг `tunnel/` (PROPFIND depth=2 → sid+init за 1 запрос), srv-hb, self-only stale-cleanup, отдача Pipe-сессий. REST-аплоад s2c по умолчанию при OAuthToken.
 - ⬜ **S7. End-to-end интеграция** — Go-сервер ↔ `webdav-tunnel -mode client` (стенд-ин WireTurn) через живой Яндекс, curl сквозь SOCKS5 → проверка egress. Wire-совместимость.
@@ -32,3 +32,4 @@
 - S0/S0.1 — каркас + дизайн. Готово до начала автономного порта.
 - S1 — PLAN.md.
 - S2 — crypto Go: derive_key + AES-256-GCM. Кросс-язык Python↔Go в обе стороны OK.
+- S3 — WebDAV-клиент Go. Live round-trip (ping/mkcol/put/get/404/propfind/delete) PASS.
