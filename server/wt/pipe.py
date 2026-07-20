@@ -44,12 +44,15 @@ def _chunk_path(sid: str, direction: str, seq: int) -> str:
 
 class Pipe:
     def __init__(self, dav: WebDAV, sid: str, write_dir: str, read_dir: str,
-                 key: bytes | None):
+                 key: bytes | None, writer=None):
         self.dav = dav
         self.sid = sid
         self.write_dir = write_dir
         self.read_dir = read_dir
         self.key = key
+        # writer.put(path, data) для аплоада чанков; по умолчанию — WebDAV PUT.
+        # Сервер может подставить REST-аплоадер (меньше троттлинга на запись).
+        self._writer = writer or dav
 
         self._closed = threading.Event()
         self._finish = threading.Event()   # запрос финального флаша+EOF
@@ -177,7 +180,7 @@ class Pipe:
         attempts = 0
         while not self._closed.is_set():
             try:
-                self.dav.put(path, body)
+                self._writer.put(path, body)
                 return
             except RateLimited as e:
                 time.sleep(e.wait)

@@ -38,10 +38,11 @@ class _PipeTransport:
 
 class Server:
     def __init__(self, dav: WebDAV, key: bytes | None,
-                 proxy: socks_upstream.ProxyConfig | None):
+                 proxy: socks_upstream.ProxyConfig | None, writer=None):
         self.dav = dav
         self.key = key
         self.proxy = proxy
+        self.writer = writer   # REST-аплоадер для s2c (или None → WebDAV PUT)
         self._known: dict[str, float] = {}   # sid -> время закрытия (0 = активна)
         self._lock = threading.Lock()
 
@@ -53,7 +54,8 @@ class Server:
             log.warning("mkcol tunnel: %s", e)
         self._startup_cleanup()
         egress = f"SOCKS5 {self.proxy.host}:{self.proxy.port}" if self.proxy else "direct"
-        log.info("server up, egress=%s, enc=%s", egress, bool(self.key))
+        upl = "REST" if self.writer else "WebDAV"
+        log.info("server up, egress=%s, enc=%s, s2c-upload=%s", egress, bool(self.key), upl)
 
         while True:
             try:
@@ -110,15 +112,19 @@ class Server:
             # сигнал клиенту «сессию подхватил»
             self.dav.put(f"tunnel/{sid}/srv-hb", str(int(time.time())).encode())
 
-            pipe = Pipe(self.dav, sid, write_dir="s2c", read_dir="c2s", key=self.key)
+            pipe = Pipe(self.dav, sid, write_dir="s2c", read_dir="c2s", key=self.key,
+                        writer=self.writer)
             pipe.start()
             sess = yamux.Session(_PipeTransport(pipe))
             log.info("[%s] session up", sid)
 
+            n_accepted = 0
             while True:
                 stream = sess.accept()
                 if stream is None:
                     break
+                n_accepted += 1
+                log.info("[%s] stream accepted (#%d)", sid, n_accepted)
                 threading.Thread(target=self._serve_stream, args=(sid, stream),
                                  name=f"strm-{sid}", daemon=True).start()
 
@@ -139,7 +145,8 @@ class Server:
     def _serve_stream(self, sid: str, stream: yamux.Stream) -> None:
         try:
             host, port = _read_target(stream)
-        except Exception:
+        except Exception as e:
+            log.info("[%s] target read failed: %s", sid, e)
             stream.close()
             return
         log.info("[%s] connect %s:%d", sid, host, port)

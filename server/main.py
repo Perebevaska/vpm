@@ -27,20 +27,21 @@ from wt.server import Server
 from wt.webdav import WebDAV
 
 
-def client_uri(webdav_url: str, login: str, password: str, enc: bool) -> str:
-    """URI для импорта в WireTurn: webdav(s)://login:pass@host?tuning[&enc=1].
+def client_uri(webdav_url: str, login: str, password: str, enc: bool,
+               name: str = "vpm") -> str:
+    """WebDAV-URL для профиля WireTurn (тип подключения = WebDAV, НЕ turnable/olcRTC).
 
-    Тюнинг = дефолты мобильного клиента (см. docs/android.md webdav-tunnel),
-    чтобы клиент и наш сервер поллили согласованно.
+    Формат по docs/generate_profiles.md WireTurn:
+      webdavs://user:pass@host?timeout=60s&poll-min=200ms&poll-max=500ms#name
+    enc=1 добавляется при --enc (нижележащий tunnel-lib парсит его из URL).
     """
     u = urlparse(webdav_url)
     scheme = "webdavs" if u.scheme == "https" else "webdav"
     host = u.netloc
-    params = ("chunk-size=131071&coalesce=10ms&poll-max=500ms&poll-min=200ms"
-              "&puts=8&read-max=8&read-min=3")
+    params = "timeout=60s&poll-min=200ms&poll-max=500ms"
     if enc:
         params += "&enc=1"
-    return f"{scheme}://{quote(login)}:{quote(password)}@{host}?{params}"
+    return f"{scheme}://{quote(login)}:{quote(password)}@{host}?{params}#{name}"
 
 
 def _env(*names: str) -> str:
@@ -59,6 +60,9 @@ def main() -> None:
                    help="AES-256-GCM (ключ из пароля) — должно совпадать с клиентом")
     p.add_argument("--proxy", default="",
                    help="upstream SOCKS5 egress: socks5://[user:pass@]host:port")
+    p.add_argument("--rest-upload", action="store_true",
+                   help="лить s2c-чанки через Yandex REST API (нужен YANDEX_OAUTH_TOKEN); "
+                        "download остаётся WebDAV. Меньше троттлинга на запись.")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -80,13 +84,19 @@ def main() -> None:
     key = crypto.derive_key(password) if args.enc else None
     proxy = socks_upstream.ProxyConfig.parse(args.proxy) if args.proxy else None
 
+    writer = None
+    if args.rest_upload:
+        from wt.rest_upload import RestUploader
+        token = _env("YANDEX_OAUTH_TOKEN")
+        writer = RestUploader(token)
+
     uri = client_uri(webdav_url, login, password, args.enc)
     print("=" * 68)
     print("WireTurn client URI (импортируй в приложение — содержит пароль!):")
     print("  " + uri)
     print("=" * 68, flush=True)
 
-    Server(dav, key, proxy).run()
+    Server(dav, key, proxy, writer).run()
 
 
 if __name__ == "__main__":
