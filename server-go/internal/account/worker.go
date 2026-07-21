@@ -34,6 +34,9 @@ func (w Worker) Run(ctx context.Context) {
 			log.Printf("account %q: accept: %v", w.Name, err)
 			continue
 		}
-		go w.Handler.Serve(ctx, s)
+		go func(s transport.Session) {
+			defer s.Close() // Cleanup папки + стоп srv-hb после завершения Serve
+			w.Handler.Serve(ctx, s)
+		}(s)
 	}
 }

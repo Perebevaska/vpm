@@ -53,11 +53,15 @@ func (h YamuxPassthrough) Serve(ctx context.Context, s transport.Session) {
 		return
 	}
 	defer ys.Close()
+	log.Printf("[%s] yamux session up", s.ID())
+	n := 0
 	for {
 		stream, err := ys.Accept()
 		if err != nil {
+			log.Printf("[%s] yamux session down after %d streams: %v", s.ID(), n, err)
 			return
 		}
+		n++
 		go h.serveStream(ctx, s.ID(), stream)
 	}
 }

@@ -27,6 +27,7 @@ const (
 	staleSessionAge = 90 * time.Second
 	pollEvery       = 3 * time.Second
 	srvHBEvery      = 20 * time.Second // как часто освежаем srv-hb (клиент следит за живостью сервера)
+	reapMisses      = 3                // сколько подряд промахов листинга до реапа known-сессии
 )
 
 type Transport struct {
@@ -40,6 +41,7 @@ type Transport struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	known     map[string]bool // только poll-горутина
+	miss      map[string]int  // подряд промахов листинга по sid (дебаунс реапа)
 }
 
 func New(acc config.Account) *Transport {
@@ -58,6 +60,7 @@ func New(acc config.Account) *Transport {
 		sessionCh: make(chan transport.Session, 8),
 		ctx:       ctx, cancel: cancel,
 		known: map[string]bool{},
+		miss:  map[string]int{},
 	}
 }
 
@@ -83,19 +86,32 @@ func (t *Transport) Close() error {
 func (t *Transport) poll() {
 	t.client.Mkcol(t.ctx, "tunnel")
 	for t.ctx.Err() == nil {
-		present := t.discoverSids()
-		for sid := range t.known { // reap: sid, чья директория исчезла
-			if !present[sid] {
-				delete(t.known, sid)
+		present, ok := t.discoverSids()
+		// Реапим ТОЛЬКО при успешном листинге и лишь после reapMisses промахов
+		// подряд. Иначе транзиентная ошибка PROPFIND (429/timeout под нагрузкой)
+		// вернула бы пусто → снос known-сессии → повторный pickup того же sid →
+		// ДУБЛЬ yamux-сервера на одной c2s/s2c-папке (воруют чанки друг у друга).
+		if ok {
+			for sid := range t.known {
+				if present[sid] {
+					t.miss[sid] = 0
+					continue
+				}
+				t.miss[sid]++
+				if t.miss[sid] >= reapMisses {
+					delete(t.known, sid)
+					delete(t.miss, sid)
+				}
 			}
-		}
-		for sid := range present {
-			if t.known[sid] {
-				continue
-			}
-			if t.hasInit(sid) { // сессия готова (init дописан последним)
-				t.known[sid] = true
-				go t.pickup(sid)
+			for sid := range present {
+				if t.known[sid] {
+					continue
+				}
+				if t.hasInit(sid) { // сессия готова (init дописан последним)
+					t.known[sid] = true
+					t.miss[sid] = 0
+					go t.pickup(sid)
+				}
 			}
 		}
 		sleepCtx(t.ctx, pollEvery)
@@ -103,11 +119,12 @@ func (t *Transport) poll() {
 }
 
 // discoverSids: PROPFIND depth=1 tunnel/ → множество sid'ов (директорий).
-func (t *Transport) discoverSids() map[string]bool {
+// Второе значение false при ошибке листинга — тогда poll НЕ реапит (см. выше).
+func (t *Transport) discoverSids() (map[string]bool, bool) {
 	present := map[string]bool{}
 	hrefs, err := t.client.Propfind(t.ctx, "tunnel", "1")
 	if err != nil {
-		return present
+		return present, false
 	}
 	for _, h := range hrefs {
 		sid := afterTunnel(h)
@@ -116,7 +133,7 @@ func (t *Transport) discoverSids() map[string]bool {
 		}
 		present[sid] = true
 	}
-	return present
+	return present, true
 }
 
 func (t *Transport) hasInit(sid string) bool {
