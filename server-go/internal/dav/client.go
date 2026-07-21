@@ -48,6 +48,18 @@ type Client struct {
 	login    string
 	password string
 	hc       *http.Client
+	lim      *Limiter // общий на аккаунт; nil = без лимита
+}
+
+// SetLimiter привязывает общий на аккаунт token-bucket (сглаживает всплески → 429).
+func (c *Client) SetLimiter(l *Limiter) { c.lim = l }
+
+// do берёт токен лимитера (если задан), затем выполняет запрос.
+func (c *Client) do(ctx context.Context, req *http.Request) (*http.Response, error) {
+	if err := c.lim.Wait(ctx); err != nil {
+		return nil, err
+	}
+	return c.hc.Do(req)
 }
 
 func NewClient(base, login, password string, timeout time.Duration) *Client {
@@ -98,7 +110,7 @@ func (c *Client) Put(ctx context.Context, path string, data []byte) error {
 		return err
 	}
 	r.ContentLength = int64(len(data))
-	resp, err := c.hc.Do(r)
+	resp, err := c.do(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -119,7 +131,7 @@ func (c *Client) Get(ctx context.Context, path string) ([]byte, int, error) {
 		return nil, 0, err
 	}
 	noCache(r)
-	resp, err := c.hc.Do(r)
+	resp, err := c.do(ctx, r)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -147,7 +159,7 @@ func (c *Client) Delete(ctx context.Context, path string) error {
 		if err != nil {
 			return err
 		}
-		resp, err := c.hc.Do(r)
+		resp, err := c.do(ctx, r)
 		if err != nil {
 			return err
 		}
@@ -172,7 +184,7 @@ func (c *Client) Mkcol(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.hc.Do(r)
+	resp, err := c.do(ctx, r)
 	if err != nil {
 		return err
 	}
@@ -200,7 +212,7 @@ func (c *Client) Propfind(ctx context.Context, path, depth string) ([]string, er
 	r.Header.Set("Depth", depth)
 	r.Header.Set("Content-Type", "application/xml")
 	noCache(r)
-	resp, err := c.hc.Do(r)
+	resp, err := c.do(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +250,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.hc.Do(r)
+	resp, err := c.do(ctx, r)
 	if err != nil {
 		return err
 	}

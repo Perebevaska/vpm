@@ -28,6 +28,11 @@ const (
 	pollEvery       = 3 * time.Second
 	srvHBEvery      = 20 * time.Second // как часто освежаем srv-hb (клиент следит за живостью сервера)
 	reapMisses      = 3                // сколько подряд промахов листинга до реапа known-сессии
+	// Лимитер запросов к аккаунту: сглаживает всплеск (Telegram открывает пачку
+	// DC-коннектов разом → всплеск запросов → 429). burst поглощает пачку, дальше
+	// rps/сек. Общий с телефоном бюджет — сервер держим «вежливым».
+	accountRPS   = 6
+	accountBurst = 8
 )
 
 type Transport struct {
@@ -35,6 +40,7 @@ type Transport struct {
 	client *dav.Client
 	up     dav.Uploader
 	key    []byte
+	lim    *dav.Limiter
 
 	once      sync.Once
 	sessionCh chan transport.Session
@@ -45,10 +51,14 @@ type Transport struct {
 }
 
 func New(acc config.Account) *Transport {
+	lim := dav.NewLimiter(accountRPS, accountBurst) // общий token-bucket на аккаунт
 	client := dav.NewClient(acc.WebDAVURL, acc.Login, acc.AppPassword, 60*time.Second)
+	client.SetLimiter(lim)
 	var up dav.Uploader = client // дефолт — WebDAV PUT
 	if acc.OAuthToken != "" {
-		up = dav.NewRestUploader(acc.OAuthToken, 60*time.Second) // s2c через REST (×3.7)
+		ru := dav.NewRestUploader(acc.OAuthToken, 60*time.Second) // s2c через REST (×3.7)
+		ru.SetLimiter(lim)
+		up = ru
 	}
 	var key []byte
 	if acc.Enc {
@@ -56,7 +66,7 @@ func New(acc config.Account) *Transport {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Transport{
-		acc: acc, client: client, up: up, key: key,
+		acc: acc, client: client, up: up, key: key, lim: lim,
 		sessionCh: make(chan transport.Session, 8),
 		ctx:       ctx, cancel: cancel,
 		known: map[string]bool{},
@@ -78,6 +88,7 @@ func (t *Transport) Accept(ctx context.Context) (transport.Session, error) {
 
 func (t *Transport) Close() error {
 	t.cancel()
+	t.lim.Stop()
 	return nil
 }
 

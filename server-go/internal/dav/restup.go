@@ -25,11 +25,15 @@ type Uploader interface {
 type RestUploader struct {
 	token string
 	hc    *http.Client
+	lim   *Limiter // общий на аккаунт (тот же бюджет, что WebDAV-клиент)
 }
 
 func NewRestUploader(oauthToken string, timeout time.Duration) *RestUploader {
 	return &RestUploader{token: oauthToken, hc: &http.Client{Timeout: timeout}}
 }
+
+// SetLimiter привязывает общий на аккаунт token-bucket.
+func (u *RestUploader) SetLimiter(l *Limiter) { u.lim = l }
 
 // Put: GET presigned href (OAuth) → PUT тела.
 func (u *RestUploader) Put(ctx context.Context, path string, data []byte) error {
@@ -42,6 +46,9 @@ func (u *RestUploader) Put(ctx context.Context, path string, data []byte) error 
 		return err
 	}
 	req.Header.Set("Authorization", "OAuth "+u.token)
+	if err := u.lim.Wait(ctx); err != nil {
+		return err
+	}
 	resp, err := u.hc.Do(req)
 	if err != nil {
 		return err
@@ -69,6 +76,9 @@ func (u *RestUploader) Put(ctx context.Context, path string, data []byte) error 
 		return err
 	}
 	put.ContentLength = int64(len(data))
+	if err := u.lim.Wait(ctx); err != nil {
+		return err
+	}
 	pr, err := u.hc.Do(put)
 	if err != nil {
 		return err
