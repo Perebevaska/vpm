@@ -31,7 +31,7 @@ Supervisor / account-изоляция / egress — **общие** для обо�
 cmd/wtserver              CLI, загрузка конфига, supervisor
 internal/config           accounts.json (stdlib, без внешних deps)
 internal/transport        интерфейсы Transport + Session
-internal/transport/webdav MVP1 транспорт (КАРКАС — портировать из Python)
+internal/transport/webdav MVP1 транспорт (реализован + захарднен)
 internal/transport/olcrtc MVP2 транспорт (ЗАГЛУШКА — WebRTC, крупная веха)
 internal/handler          SessionHandler: YamuxPassthrough (MVP1) / VLESSBridge (MVP2)
 internal/egress           Dialer: Direct / upstream SOCKS5 (реализовано)
@@ -39,18 +39,29 @@ internal/account          Worker на аккаунт
 internal/supervisor       сборка транспорт×handler по типу аккаунта
 ```
 
-## Статус
-- ✅ **MVP1 (webdav) рабочий end-to-end.** crypto, WebDAV-клиент, REST-аплоадер, Pipe,
-  `webdav.Transport`, egress (direct/SOCKS5), yamux-passthrough. Проверено:
-  `wtserver` ↔ `webdav-tunnel -mode client` (стенд-ин WireTurn) через живой Яндекс,
-  curl сквозь SOCKS5 доходит до цели. Wire-совместимо с WireTurn.
-- ⬜ `olcrtc.Transport` + `VLESSBridge` — MVP2 (pion/webrtc, сигналинг, видео-кодирование). Заглушка.
+> Проектный документ верхнего уровня (все каналы, БС-модель, деплой) — корневой
+> [../README.md](../README.md). Здесь — README Go-сервера. Деплой рядом с 3x-ui —
+> [../SETUP-3xui.md](../SETUP-3xui.md).
 
-Прогресс и журнал — в [PLAN.md](PLAN.md). Дизайн-решения (с учётом замера #8) — [DESIGN.md](DESIGN.md).
+## Статус
+- ✅ **MVP1 (webdav) готов и захарднен под прод-нагрузку.** crypto, WebDAV-клиент,
+  REST-аплоадер, Pipe, `webdav.Transport`, egress (direct/SOCKS5), yamux-passthrough.
+  Проверено E2E (`wtserver` ↔ стенд-ин WireTurn через живой Яндекс, curl сквозь
+  SOCKS5). Wire-совместимо с WireTurn. Плюс хардненинг: дедубль сессий, rate-лимитер,
+  бэкпрешер (RSS ограничен), discovery-модель. Вживую: текст + мелкие фото проходят;
+  ≥~10 МБ рвёт клиента по потолку общего аккаунта (резервный **текстовый** канал).
+- ⬜ `olcrtc.Transport` + `VLESSBridge` — MVP2 (pion/webrtc, сигналинг, видео-кодек).
+  Заглушка; детальный план S9 — в [PLAN.md](PLAN.md).
+- ⛔ MVP0 (Yandex Functions) — исключён (туннель не поднять; см. корневой README).
+
+Прогресс и журнал — в [PLAN.md](PLAN.md). Дизайн-решения — [DESIGN.md](DESIGN.md).
+Wire-протокол — [PROTOCOL.md](PROTOCOL.md).
 
 ### Заметки реализации
 - Яндекс отдаёт **403 на PROPFIND Depth:2** → discovery = depth=1 + GET `init` на кандидата.
-- Тюнинг-дефолты (замер #8): chunk 256KB, read-ahead 16, put-workers 16, poll 50–300ms.
+- Тюнинг-дефолты (актуальные, привязаны к WireTurn): chunk 131071 (128KB−1),
+  read-ahead 4, put-workers 4, доставка 50–300ms, discovery 120–400ms, rate-лимитер
+  8 rps/burst. Подробности — [DESIGN.md](DESIGN.md).
 - Тесты live скипаются без кредов; запуск: `set -a && . /path/.env && set +a && go test ./...`.
 
 ## Запуск
