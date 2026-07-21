@@ -57,6 +57,10 @@ func (u *RestUploader) Put(ctx context.Context, path string, data []byte) error 
 		drain(resp)
 		return &RateLimited{retryAfter(resp.Header)}
 	}
+	if resp.StatusCode == 404 || resp.StatusCode == 409 {
+		drain(resp)
+		return fmt.Errorf("REST upload-href %s: %s: %w", path, resp.Status, ErrTargetGone)
+	}
 	if resp.StatusCode != 200 {
 		drain(resp)
 		return fmt.Errorf("REST upload-href %s: %s", path, resp.Status)

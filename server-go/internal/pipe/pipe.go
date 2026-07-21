@@ -56,9 +56,20 @@ const (
 	deleteWorkers = 2
 	deleteBuf     = 512
 
+	// Backpressure: очередь на аплоад ограничена, Write блокирует при переполнении
+	// outBuf. Иначе под rate-limit'ом (аплоад медленнее записи) буфер и число
+	// putChunk-горутин росли без границы → runaway RSS (видели 118МБ на 11МБ файле).
+	putQueueLen = 8
+	maxOutBuf   = 512 * 1024
+
 	headerData = 0x00
 	headerEOF  = 0x01
 )
+
+type putJob struct {
+	seq     int64
+	payload []byte
+}
 
 func chunkPath(sid, dir string, seq int64) string {
 	// tunnel/<sid>/<dir>/%010d.bin
@@ -89,10 +100,11 @@ type Pipe struct {
 
 	// writer
 	outMu      sync.Mutex
+	outCond    *sync.Cond // будит Write, когда flusher слил outBuf (backpressure)
 	outBuf     []byte
 	writeSeq   int64 // только flusher-горутина
 	outEOFSent bool
-	putSem     chan struct{}
+	putCh      chan putJob // очередь на аплоад (ограничена → backpressure)
 	putWg      sync.WaitGroup
 
 	finish      chan struct{}
@@ -114,16 +126,18 @@ type Pipe struct {
 // New создаёт пайп. up — аплоадер write-пути (WebDAV PUT или REST).
 func New(client *dav.Client, up dav.Uploader, sid, writeDir, readDir string, key []byte) *Pipe {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Pipe{
+	p := &Pipe{
 		dav: client, up: up, sid: sid, writeDir: writeDir, readDir: readDir, key: key,
 		ctx: ctx, cancel: cancel,
-		putSem:      make(chan struct{}, PutWorkers),
+		putCh:       make(chan putJob, putQueueLen),
 		finish:      make(chan struct{}),
 		flusherDone: make(chan struct{}),
 		inCh:        make(chan []byte, 128),
 		readClosed:  make(chan struct{}),
 		delCh:       make(chan string, deleteBuf),
 	}
+	p.outCond = sync.NewCond(&p.outMu)
+	return p
 }
 
 func (p *Pipe) ID() string { return p.sid }
@@ -135,8 +149,25 @@ func (p *Pipe) Start() {
 	p.started = true
 	go p.runFlusher()
 	go p.runReader()
+	for i := 0; i < PutWorkers; i++ {
+		go p.putWorker()
+	}
 	for i := 0; i < deleteWorkers; i++ {
 		go p.runDeleter()
+	}
+}
+
+// putWorker — фикс. пул аплоадеров. Пул + ограниченная putCh = верхняя граница
+// незалитых чанков в памяти (backpressure вместо неограниченного числа горутин).
+func (p *Pipe) putWorker() {
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case job := <-p.putCh:
+			p.doPut(job.seq, job.payload)
+			p.putWg.Done()
+		}
 	}
 }
 
@@ -208,13 +239,29 @@ func (p *Pipe) Write(data []byte) (int, error) {
 	default:
 	}
 	p.outMu.Lock()
+	// Backpressure: ждём, пока flusher сольёт буфер ниже порога. Иначе под
+	// rate-limit'ом (аплоад медленнее записи) outBuf растёт без границы.
+	for len(p.outBuf) >= maxOutBuf {
+		select {
+		case <-p.finish:
+			p.outMu.Unlock()
+			return 0, io.ErrClosedPipe
+		default:
+		}
+		p.outCond.Wait() // отпускает outMu, будится flush'ем / Close'ом
+	}
 	p.outBuf = append(p.outBuf, data...)
 	p.outMu.Unlock()
 	return len(data), nil
 }
 
 func (p *Pipe) Close() error {
-	p.finishOnce.Do(func() { close(p.finish) })
+	p.finishOnce.Do(func() {
+		close(p.finish)
+		p.outMu.Lock()
+		p.outCond.Broadcast() // разбудить Write, застрявшие на backpressure
+		p.outMu.Unlock()
+	})
 	if p.started {
 		waitCh(p.flusherDone, 20*time.Second) // финальный флаш + EOF эмитнуты
 		wg := make(chan struct{})
@@ -270,6 +317,7 @@ func (p *Pipe) flush(force, sendEOF bool) {
 		copy(data, p.outBuf[:take])
 		p.outBuf = p.outBuf[take:]
 		p.outMu.Unlock()
+		p.outCond.Broadcast() // буфер сжался → разбудить ждущие Write
 		p.emitChunk(headerData, data)
 	}
 	if sendEOF && !p.outEOFSent {
@@ -286,14 +334,14 @@ func (p *Pipe) emitChunk(header byte, data []byte) {
 	binary.BigEndian.PutUint64(payload[1:9], uint64(time.Now().UnixNano()))
 	copy(payload[9:], data)
 	p.putWg.Add(1)
-	go p.putChunk(seq, payload)
+	select {
+	case p.putCh <- putJob{seq, payload}: // блокирует при полной очереди = backpressure
+	case <-p.ctx.Done():
+		p.putWg.Done()
+	}
 }
 
-func (p *Pipe) putChunk(seq int64, payload []byte) {
-	defer p.putWg.Done()
-	p.putSem <- struct{}{}
-	defer func() { <-p.putSem }()
-
+func (p *Pipe) doPut(seq int64, payload []byte) {
 	body := payload
 	if len(p.key) > 0 {
 		b, err := crypto.EncryptChunk(p.key, payload)
@@ -312,6 +360,9 @@ func (p *Pipe) putChunk(seq int64, payload []byte) {
 		}
 		if p.ctx.Err() != nil {
 			return
+		}
+		if errors.Is(err, dav.ErrTargetGone) {
+			return // папка сессии удалена клиентом — не льём в мёртвую сессию
 		}
 		var rl *dav.RateLimited
 		if errors.As(err, &rl) {

@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,10 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrTargetGone — цель записи исчезла (папка сессии удалена клиентом): 404/409.
+// Писателю нет смысла ретраить — сессия мертва, надо сдаться.
+var ErrTargetGone = errors.New("target gone (session dir removed)")
 
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 	"(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -117,6 +122,9 @@ func (c *Client) Put(ctx context.Context, path string, data []byte) error {
 	drain(resp)
 	if resp.StatusCode == 429 {
 		return &RateLimited{retryAfter(resp.Header)}
+	}
+	if resp.StatusCode == 404 || resp.StatusCode == 409 {
+		return fmt.Errorf("PUT %s: %s: %w", path, resp.Status, ErrTargetGone)
 	}
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("PUT %s: %s", path, resp.Status)
