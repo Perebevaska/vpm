@@ -2,8 +2,8 @@
 
 Туннель через **Яндекс.Диск по WebDAV**: телефон и домашний узел общаются только
 через `webdav.yandex.ru` (в белом списке), напрямую друг с другом — нет. Поэтому
-проходит в БС. Клиент — готовый **WireTurn** (Android), сервер — готовый
-**`spkprsnts/webdav-tunnel`**. Своего кода нет, только сборка/настройка.
+проходит в БС. Клиент — готовый **WireTurn** (Android), сервер — наш собственный
+на Go (`server-go/`, бинарь `wtserver`), wire-совместимый с WireTurn.
 
 ## Роль
 Несгораемый резерв: КБ/с, задержка секунды (поллинг файлов). Для текста / ssh /
@@ -19,15 +19,15 @@
    webdav.yandex.ru   ← общий аккаунт Яндекса, whitelisted → проходит БС
       ▲
       │  поллит/пишет чанки
-[Домашний узел, WSL2]  webdav-tunnel -mode server
-      │  -proxy socks5://192.168.1.1:10800   (bypass-in на xkeen)
+[Домашний узел, WSL2]  wtserver -config accounts.json
+      │  egress → socks5://192.168.1.1:10800   (bypass-in на xkeen)
       ▼
    vless-reality → meat → цепочка → интернет
 ```
 
 Ключевое: и WireTurn, и сервер ходят **только на `webdav.yandex.ru`** и
 координируются через чанк-файлы. Сервер сам в интернет не выпускает — его egress
-завёрнут флагом `-proxy` в `bypass-in` на роутере, дальше в твою цепочку. Значит
+завёрнут в `bypass-in` на роутере, дальше в твою цепочку. Значит
 **exit = цепочка (meat)**, а не домашний РФ-адрес.
 
 ## Компоненты (всё готовое)
@@ -35,25 +35,25 @@
 | Часть | Что | Где |
 |-------|-----|-----|
 | Клиент (Android) | WireTurn, режим WebDAV | `github.com/spkprsnts/WireTurn` (releases → APK) |
-| Сервер (WSL2) | webdav-tunnel, `-mode server` | `github.com/spkprsnts/webdav-tunnel` |
+| Сервер (WSL2) | наш `wtserver` (Go) | `server-go/` (см. `server-go/README.md`) |
 | Хранилище-посредник | Яндекс.Диск WebDAV | `https://webdav.yandex.ru` |
 | Вход в цепочку | `bypass-in` socks на xkeen | `192.168.1.1:10800` (см. основной план, разд. 2.4) |
 
 ## Порядок деплоя
 
 1. **Предусловие:** на xkeen поднят `bypass-in` (socks `0.0.0.0:10800` →
-   `vless-reality`). Это тот же seam, что для olcRTC — см. `SETUP-server-webdav-tunnel.md` и основной план 2.4.
+   `vless-reality`). Это тот же seam, что для olcRTC — основной план 2.4.
 2. **Аккаунт Диска:** заведи пароль приложения (Яндекс ID → Безопасность → Пароли
    приложений, тип WebDAV). Один аккаунт используют обе стороны.
-3. **Сервер:** по `SETUP-server-webdav-tunnel.md` — собрать/взять бинарь, запустить
-   в external WebDAV mode с `-enc` и `-proxy socks5://192.168.1.1:10800`. Он
-   напечатает **client URI**.
+3. **Сервер:** по `server-go/README.md` — собрать `wtserver`, заполнить
+   `accounts.json` (логин/пароль приложения, `enc`, egress-proxy) и запустить
+   `wtserver -config accounts.json`.
 4. **Клиент:** по `SETUP-wireturn-client.md` — импортировать этот URI в WireTurn
    (QR/буфер), включить шифрование, стартовать.
 
 ## Чеклист приёмки
 
-- [ ] Сервер webdav-tunnel запущен на WSL2, в логах видно поллинг `webdav.yandex.ru`.
+- [ ] Сервер `wtserver` запущен на WSL2, в логах видно поллинг `webdav.yandex.ru`.
 - [ ] На Диске в рабочей папке появляются/исчезают чанк-файлы.
 - [ ] `curl --socks5 192.168.1.1:10800 https://api.ipify.org` с WSL2 → IP цепочки
       (подтверждает, что `-proxy`-цель рабочая).
@@ -67,16 +67,14 @@
 - **iOS нет** — WireTurn только Android.
 - **Анти-абуз Диска:** частый churn мелких файлов может словить троттлинг/бан
   аккаунта → умеренный `poll`/`chunk` (тюнинг в URI), не гонять тяжёлое.
-- Пара «WireTurn ↔ webdav-tunnel против именно Яндекс.Диска» подтверждённо описанной
-  не встречал — прогнать реальный тест до того, как полагаться (у Яндекс.Диск
-  WebDAV свои квирки методов/лимитов).
+- Пара «WireTurn ↔ наш сервер против именно Яндекс.Диска» — прогнать реальный тест
+  до того, как полагаться (у Яндекс.Диск WebDAV свои квирки методов/лимитов).
 
 ## Файлы
 
 ```
 mvp1-disk-webdav/
-├── README.md                       ← этот файл
-├── SETUP-server-webdav-tunnel.md   ← сервер на WSL2 (external WebDAV + proxy в цепочку)
-├── SETUP-wireturn-client.md        ← клиент WireTurn (WebDAV-профиль)
-└── webdav-tunnel.service           ← пример systemd-юнита
+├── README.md                 ← этот файл
+├── SETUP-wireturn-client.md  ← клиент WireTurn (WebDAV-профиль)
+└── server-go/                ← сервер на Go (wtserver): сборка, конфиг, деплой
 ```
