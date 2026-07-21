@@ -110,12 +110,28 @@ func noCache(r *http.Request) {
 }
 
 func (c *Client) Put(ctx context.Context, path string, data []byte) error {
+	return c.putImpl(ctx, path, data, true)
+}
+
+// PutNoLimit — PUT в обход rate-лимитера. Для критичных мелких контрол-файлов
+// (srv-hb): liveness-сигнал не должен голодать в очереди за данными файла, иначе
+// клиент под нагрузкой видит протухший srv-hb и рвёт сессию.
+func (c *Client) PutNoLimit(ctx context.Context, path string, data []byte) error {
+	return c.putImpl(ctx, path, data, false)
+}
+
+func (c *Client) putImpl(ctx context.Context, path string, data []byte, limited bool) error {
 	r, err := c.newReq(ctx, "PUT", path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
 	r.ContentLength = int64(len(data))
-	resp, err := c.do(ctx, r)
+	var resp *http.Response
+	if limited {
+		resp, err = c.do(ctx, r)
+	} else {
+		resp, err = c.hc.Do(r)
+	}
 	if err != nil {
 		return err
 	}

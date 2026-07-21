@@ -174,7 +174,8 @@ func (t *Transport) pickup(sid string) {
 }
 
 func (t *Transport) writeSrvHB(sid string) {
-	t.client.Put(t.ctx, "tunnel/"+sid+"/srv-hb",
+	// В обход лимитера: liveness не должен голодать за данными под нагрузкой.
+	t.client.PutNoLimit(t.ctx, "tunnel/"+sid+"/srv-hb",
 		[]byte(strconv.FormatInt(time.Now().Unix(), 10)))
 }
 
