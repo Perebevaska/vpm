@@ -27,7 +27,11 @@ type SessionHandler interface {
 
 func yamuxConfig() *yamux.Config {
 	c := yamux.DefaultConfig()
-	c.EnableKeepAlive = true
+	// Keepalive сервера ВЫКЛ: под rate-limit'ом Диска pong не доходит за дедлайн
+	// → yamux рвёт сессию ("keepalive timeout"), хотя туннель жив. На pong'и
+	// клиента yamux отвечает и без этого; живость мёртвого пира ловит idle-таймаут
+	// пайпа (5 мин) и staleness клиента. Резервному каналу важнее не падать.
+	c.EnableKeepAlive = false
 	c.ConnectionWriteTimeout = 120 * time.Second
 	// Окно 24МБ (как у клиента, PROTOCOL.md). Узкое окно (пробовали 4МБ) —
 	// ХУЖЕ: yamux рефрешит его чаще → лавина WINDOW_UPDATE-кадров уходит в s2c,

@@ -33,24 +33,31 @@ const (
 	// читает s2c — 1МБ s2c-файлы мешали хендшейку прокси (Telegram не коннектился).
 	// Размер должен совпадать со стороной клиента, а не оптимизироваться в одну.
 	ChunkDataSize = 128*1024 - 1
-	ReadAhead     = 16
-	PutWorkers    = 16
-	PollMin       = 50 * time.Millisecond
-	PollMax       = 300 * time.Millisecond
-	// Каденция discovery-PROPFIND отдельная и мягче: аккаунт общий с телефоном,
-	// один листинг и так возвращает все готовые c2s-чанки, 50мс-пол избыточен и
-	// съедал rate-бюджет (до 20 PROPFIND/с от сервера под нагрузкой).
-	DiscoverMin   = 250 * time.Millisecond
-	DiscoverMax   = 1000 * time.Millisecond
+	// Параллелизм скромный: канал резервный, текстовый (КБ, не МБ). Много
+	// воркеров = всплеск запросов (троттл Диска) + реордеринг (медленный PUT
+	// одного seq стопорит in-order читателя). 4 хватает.
+	ReadAhead  = 4
+	PutWorkers = 4
+	PollMin    = 50 * time.Millisecond
+	PollMax    = 300 * time.Millisecond
+	// Каденция discovery-PROPFIND. Отдельная от fetch-ретраев. Компромисс
+	// латентность↔нагрузка: один листинг возвращает ВСЕ готовые c2s-чанки, так
+	// что даже частый PROPFIND дешевле старого blind read-ahead (16 GET/цикл).
+	// Backoff в простое держим коротким (400мс, не 1с) — иначе интерактивный
+	// c2s ждёт до backoff перед забором → пинг в секундах.
+	DiscoverMin   = 120 * time.Millisecond
+	DiscoverMax   = 400 * time.Millisecond
 	CoalesceDelay = 10 * time.Millisecond
-	IdleTimeout   = 90 * time.Second
+	// Idle-таймаут длинный: резервный канал подолгу простаивает в ожидании
+	// редких сообщений. Keepalive сервера выключен (см. handler), поэтому idle —
+	// единственный сторож мёртвой сессии; 90с рвало бы живой idle-туннель.
+	IdleTimeout = 5 * time.Minute
 
 	deleteWorkers = 2
 	deleteBuf     = 512
 
-	putMaxAttempts = 15
-	headerData     = 0x00
-	headerEOF      = 0x01
+	headerData = 0x00
+	headerEOF  = 0x01
 )
 
 func chunkPath(sid, dir string, seq int64) string {
@@ -298,7 +305,6 @@ func (p *Pipe) putChunk(seq int64, payload []byte) {
 	}
 	path := chunkPath(p.sid, p.writeDir, seq)
 	backoff := 500 * time.Millisecond
-	attempts := 0
 	for !p.closed.Load() {
 		err := p.up.Put(p.ctx, path, body)
 		if err == nil {
@@ -312,11 +318,10 @@ func (p *Pipe) putChunk(seq int64, payload []byte) {
 			sleepCtx(p.ctx, rl.Wait)
 			continue
 		}
-		attempts++
-		if attempts >= putMaxAttempts {
-			p.fail() // иначе читатель встанет на этом seq
-			return
-		}
+		// Транзиентная ошибка (таймаут/5xx/сброс — часто под rate-limit) НЕ
+		// роняет сессию: раньше fail() после 15 попыток убивал весь туннель
+		// из-за одного чанка. Ретраим с capped backoff; мёртвого пира отсечёт
+		// idle-таймаут или реконнект клиента.
 		sleepCtx(p.ctx, backoff)
 		backoff = time.Duration(float64(backoff) * 1.5)
 		if backoff > 10*time.Second {
