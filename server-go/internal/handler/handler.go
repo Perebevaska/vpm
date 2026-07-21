@@ -29,11 +29,11 @@ func yamuxConfig() *yamux.Config {
 	c := yamux.DefaultConfig()
 	c.EnableKeepAlive = true
 	c.ConnectionWriteTimeout = 120 * time.Second
-	// Приёмное окно c2s (upload): держим узким, чтобы клиент не заливал наперёд
-	// мегабайты в Диск быстрее, чем сервер их дренит в egress — иначе чанки
-	// копятся, растёт request-churn на аккаунте и Яндекс троттлит. yamux растит
-	// окно WindowUpdate'ами до этого потолка; апгрейд окна клиента принимаем как есть.
-	c.MaxStreamWindowSize = 4 * 1024 * 1024
+	// Окно 24МБ (как у клиента, PROTOCOL.md). Узкое окно (пробовали 4МБ) —
+	// ХУЖЕ: yamux рефрешит его чаще → лавина WINDOW_UPDATE-кадров уходит в s2c,
+	// s2c пухнет, телефон под троттлом не успевает дренить → keepalive-pong не
+	// доходит → обрыв. Широкое окно = редкие апдейты = меньшеس2c-churn.
+	c.MaxStreamWindowSize = 24 * 1024 * 1024
 	c.LogOutput = io.Discard
 	return c
 }
