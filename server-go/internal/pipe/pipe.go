@@ -37,6 +37,11 @@ const (
 	PutWorkers    = 16
 	PollMin       = 50 * time.Millisecond
 	PollMax       = 300 * time.Millisecond
+	// Каденция discovery-PROPFIND отдельная и мягче: аккаунт общий с телефоном,
+	// один листинг и так возвращает все готовые c2s-чанки, 50мс-пол избыточен и
+	// съедал rate-бюджет (до 20 PROPFIND/с от сервера под нагрузкой).
+	DiscoverMin   = 250 * time.Millisecond
+	DiscoverMax   = 1000 * time.Millisecond
 	CoalesceDelay = 10 * time.Millisecond
 	IdleTimeout   = 90 * time.Second
 
@@ -406,14 +411,14 @@ func (p *Pipe) runReader() {
 // чанков в availCh. Один листинг вместо слепого read-ahead из ReadAhead GET'ов по
 // ещё-не-записанным seq — на порядок меньше запросов к Диску. Интервал адаптивный.
 func (p *Pipe) runDiscover(availCh chan<- int64) {
-	backoff := PollMin
+	backoff := DiscoverMin
 	for {
 		if p.ctx.Err() != nil {
 			return
 		}
 		seqs, ok := p.listReadDir()
 		if ok && len(seqs) > 0 {
-			backoff = PollMin
+			backoff = DiscoverMin
 			for _, s := range seqs {
 				select {
 				case availCh <- s:
@@ -423,8 +428,8 @@ func (p *Pipe) runDiscover(availCh chan<- int64) {
 			}
 		} else {
 			backoff *= 2
-			if backoff > PollMax {
-				backoff = PollMax
+			if backoff > DiscoverMax {
+				backoff = DiscoverMax
 			}
 		}
 		if !sleepCtx(p.ctx, backoff) {
