@@ -16,6 +16,8 @@ import (
 	"errors"
 	"io"
 	"math/rand"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,13 +28,19 @@ import (
 
 // Тюнинг-дефолты (замер #8; см. DESIGN.md). Латентно-связаны → шире параллелизм.
 const (
-	ChunkDataSize = 256*1024 - 1
+	// s2c-чанк крупный: сервер режет исходящий поток реже → меньше файлов на Диске
+	// → клиент делает меньше GET'ов → меньше троттлинга Диска. Читатель забирает
+	// файл целиком, размер per-side (PROTOCOL.md), увеличение wire-safe.
+	ChunkDataSize = 1024*1024 - 1
 	ReadAhead     = 16
 	PutWorkers    = 16
 	PollMin       = 50 * time.Millisecond
 	PollMax       = 300 * time.Millisecond
 	CoalesceDelay = 10 * time.Millisecond
 	IdleTimeout   = 90 * time.Second
+
+	deleteWorkers = 2
+	deleteBuf     = 512
 
 	putMaxAttempts = 15
 	headerData     = 0x00
@@ -84,6 +92,8 @@ type Pipe struct {
 	readClosed     chan struct{}
 	readClosedOnce sync.Once
 
+	delCh chan string // прочитанные чанки на удаление (bounded rate)
+
 	closed  atomic.Bool
 	started bool
 }
@@ -99,6 +109,7 @@ func New(client *dav.Client, up dav.Uploader, sid, writeDir, readDir string, key
 		flusherDone: make(chan struct{}),
 		inCh:        make(chan []byte, 128),
 		readClosed:  make(chan struct{}),
+		delCh:       make(chan string, deleteBuf),
 	}
 }
 
@@ -111,6 +122,34 @@ func (p *Pipe) Start() {
 	p.started = true
 	go p.runFlusher()
 	go p.runReader()
+	for i := 0; i < deleteWorkers; i++ {
+		go p.runDeleter()
+	}
+}
+
+// runDeleter — bounded удаление прочитанных чанков. Ограничение числа воркеров
+// держит DELETE-rate низким (иначе на каждый прочитанный чанк летел отдельный
+// DELETE-запрос → лишний churn и троттлинг Диска).
+func (p *Pipe) runDeleter() {
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case path := <-p.delCh:
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			p.dav.Delete(ctx, path)
+			cancel()
+		}
+	}
+}
+
+// enqueueDelete ставит чанк в очередь на удаление без блокировки читателя;
+// при переполнении буфера чанк пропускается — итоговую уборку сделает Cleanup.
+func (p *Pipe) enqueueDelete(path string) {
+	select {
+	case p.delCh <- path:
+	default:
+	}
 }
 
 // ── io.ReadWriteCloser ──────────────────────────────────────────────────────
@@ -288,39 +327,60 @@ func (p *Pipe) runReader() {
 		payload []byte
 		ok      bool
 	}
+	availCh := make(chan int64, ReadAhead*4)
+	go p.runDiscover(availCh)
+
 	fetchDone := make(chan res, ReadAhead+4)
-	var nextDeliver, nextFetch int64 = 1, 1
+	var nextDeliver int64 = 1
 	inflight := 0
-	results := map[int64][]byte{}
+	pending := map[int64]bool{}   // обнаружены на Диске, ещё не качаем
+	fetching := map[int64]bool{}  // GET в процессе
+	results := map[int64][]byte{} // скачаны, ждут доставки по порядку
 
 	launch := func() {
-		seq := nextFetch
-		nextFetch++
-		inflight++
-		go func() {
-			payload, ok := p.fetchChunk(seq)
-			select {
-			case fetchDone <- res{seq, payload, ok}:
-			case <-p.ctx.Done():
+		for inflight < ReadAhead {
+			best := int64(-1) // младший pending в окне [nextDeliver, +ReadAhead)
+			for seq := range pending {
+				if seq < nextDeliver+ReadAhead && (best < 0 || seq < best) {
+					best = seq
+				}
 			}
-		}()
-	}
-	for inflight < ReadAhead {
-		launch()
+			if best < 0 {
+				return
+			}
+			delete(pending, best)
+			fetching[best] = true
+			inflight++
+			seq := best
+			go func() {
+				payload, ok := p.fetchChunk(seq)
+				select {
+				case fetchDone <- res{seq, payload, ok}:
+				case <-p.ctx.Done():
+				}
+			}()
+		}
 	}
 
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
+		case seq := <-availCh:
+			if seq >= nextDeliver && !fetching[seq] && !pending[seq] {
+				if _, done := results[seq]; !done {
+					pending[seq] = true
+				}
+			}
+			launch()
 		case r := <-fetchDone:
 			inflight--
-			if !r.ok {
+			delete(fetching, r.seq)
+			if !r.ok { // fetchChunk сдаётся только при отмене ctx/закрытии
 				p.setEOF()
 				return
 			}
 			results[r.seq] = r.payload
-			launch()
 			for {
 				payload, ok := results[nextDeliver]
 				if !ok {
@@ -336,8 +396,62 @@ func (p *Pipe) runReader() {
 				}
 				nextDeliver++
 			}
+			launch() // окно могло сдвинуться → добрать pending
 		}
 	}
+}
+
+// runDiscover периодически листит readDir (PROPFIND) и шлёт номера присутствующих
+// чанков в availCh. Один листинг вместо слепого read-ahead из ReadAhead GET'ов по
+// ещё-не-записанным seq — на порядок меньше запросов к Диску. Интервал адаптивный.
+func (p *Pipe) runDiscover(availCh chan<- int64) {
+	backoff := PollMin
+	for {
+		if p.ctx.Err() != nil {
+			return
+		}
+		seqs, ok := p.listReadDir()
+		if ok && len(seqs) > 0 {
+			backoff = PollMin
+			for _, s := range seqs {
+				select {
+				case availCh <- s:
+				case <-p.ctx.Done():
+					return
+				}
+			}
+		} else {
+			backoff *= 2
+			if backoff > PollMax {
+				backoff = PollMax
+			}
+		}
+		if !sleepCtx(p.ctx, backoff) {
+			return
+		}
+	}
+}
+
+// listReadDir возвращает seq'ы .bin-чанков в readDir. Второе значение — успех
+// листинга (false при ошибке/429 — тогда discover просто ждёт и повторит).
+func (p *Pipe) listReadDir() ([]int64, bool) {
+	hrefs, err := p.dav.Propfind(p.ctx, "tunnel/"+p.sid+"/"+p.readDir, "1")
+	if err != nil {
+		return nil, false
+	}
+	out := make([]int64, 0, len(hrefs))
+	for _, h := range hrefs {
+		name := dav.LastSegment(h)
+		if !strings.HasSuffix(name, ".bin") {
+			continue
+		}
+		n, perr := strconv.ParseInt(strings.TrimSuffix(name, ".bin"), 10, 64)
+		if perr != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out, true
 }
 
 func (p *Pipe) fetchChunk(seq int64) ([]byte, bool) {
@@ -379,11 +493,7 @@ func (p *Pipe) fetchChunk(seq int64) ([]byte, bool) {
 			}
 			continue
 		}
-		go func() { // удалить прочитанный чанк (best-effort)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			p.dav.Delete(ctx, path)
-		}()
+		p.enqueueDelete(path) // удалить прочитанный чанк (bounded rate, best-effort)
 		return payload, true
 	}
 	return nil, false

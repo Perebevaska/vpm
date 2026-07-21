@@ -26,6 +26,7 @@ import (
 const (
 	staleSessionAge = 90 * time.Second
 	pollEvery       = 3 * time.Second
+	srvHBEvery      = 20 * time.Second // как часто освежаем srv-hb (клиент следит за живостью сервера)
 )
 
 type Transport struct {
@@ -131,16 +132,38 @@ func (t *Transport) pickup(sid string) {
 		return
 	}
 	// сигнал клиенту «подхватил»
-	t.client.Put(t.ctx, "tunnel/"+sid+"/srv-hb",
-		[]byte(strconv.FormatInt(time.Now().Unix(), 10)))
+	t.writeSrvHB(sid)
 
 	p := pipe.New(t.client, t.up, sid, "s2c", "c2s", t.key) // сервер: пишет s2c, читает c2s
 	p.Start()
-	s := &session{Pipe: p, client: t.client}
+	s := &session{Pipe: p, client: t.client, stopHB: make(chan struct{})}
+	go t.heartbeat(sid, s.stopHB) // освежаем srv-hb, пока сессия жива
 	select {
 	case t.sessionCh <- s:
 	case <-t.ctx.Done():
 		s.Close()
+	}
+}
+
+func (t *Transport) writeSrvHB(sid string) {
+	t.client.Put(t.ctx, "tunnel/"+sid+"/srv-hb",
+		[]byte(strconv.FormatInt(time.Now().Unix(), 10)))
+}
+
+// heartbeat периодически переписывает srv-hb, чтобы клиент видел сервер живым и
+// не рвал сессию по таймауту (иначе реконнект → новый sid → churn/обрыв заливки).
+func (t *Transport) heartbeat(sid string, stop <-chan struct{}) {
+	tk := time.NewTicker(srvHBEvery)
+	defer tk.Stop()
+	for {
+		select {
+		case <-tk.C:
+			t.writeSrvHB(sid)
+		case <-stop:
+			return
+		case <-t.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -160,11 +183,13 @@ func (t *Transport) sessionAge(sid string) time.Duration {
 type session struct {
 	*pipe.Pipe
 	client    *dav.Client
+	stopHB    chan struct{}
 	closeOnce sync.Once
 }
 
 func (s *session) Close() error {
 	s.closeOnce.Do(func() {
+		close(s.stopHB) // остановить srv-hb refresher
 		s.Pipe.Close()
 		s.Pipe.Cleanup() // удалить tunnel/<sid>
 	})
